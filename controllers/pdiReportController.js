@@ -2,6 +2,7 @@ import { query } from '../db/db.js';
 import { findTemplateByPartNumber, generateRandomReadings } from '../models/pdiTemplateModel.js';
 import { findProductByPartNumber } from '../models/productModel.js';
 import { generatePdiReportWorkbook } from '../utils/shiftReportCron.js';
+import { sendMail } from '../utils/mailer.js';
 import fs from 'fs';
 
 function getShiftLetter(date) {
@@ -257,6 +258,163 @@ export async function exportPdiExcel(req, res) {
     });
   } catch (err) {
     console.error('Export PDI Excel error:', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+}
+
+export async function exportManualPdiExcel(req, res) {
+  try {
+    const { partNumber, shift = 'A', date, rows, inspectorName } = req.body;
+    if (!partNumber) {
+      return res.status(400).json({ success: false, message: 'partNumber is required' });
+    }
+
+    const template = await findTemplateByPartNumber(partNumber);
+    const product = await findProductByPartNumber(partNumber);
+
+    const safeDate = (date || new Date().toISOString().slice(0, 10)).replace(/[^a-zA-Z0-9-]/g, '_');
+    const safePart = partNumber.replace(/[^a-zA-Z0-9]/g, '_');
+
+    const { filePath } = await generatePdiReportWorkbook({
+      partNumber,
+      shift: shift === 'All' ? 'A' : shift,
+      records: [{ created_by: inspectorName || req.user?.name || 'Quality Inspector' }],
+      template,
+      product,
+      date,
+      customRows: rows,
+      isManual: true,
+    });
+
+    res.download(filePath, `PDI_Manual_${safePart}_${shift}_${safeDate}.xlsx`, (err) => {
+      if (err) console.error('Manual download error:', err);
+      fs.unlink(filePath, () => {});
+    });
+  } catch (err) {
+    console.error('Export Manual PDI Excel error:', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+}
+
+export async function sendManualPdiEmail(req, res) {
+  try {
+    const { partNumber, shift = 'A', date, rows, recipients, remarks = '', inspectorName } = req.body;
+    if (!partNumber) {
+      return res.status(400).json({ success: false, message: 'partNumber is required' });
+    }
+    if (!recipients || (Array.isArray(recipients) && recipients.length === 0)) {
+      return res.status(400).json({ success: false, message: 'At least one recipient email address is required' });
+    }
+
+    const template = await findTemplateByPartNumber(partNumber);
+    const product = await findProductByPartNumber(partNumber);
+
+    const safeDate = (date || new Date().toISOString().slice(0, 10)).replace(/[^a-zA-Z0-9-]/g, '_');
+    const safePart = partNumber.replace(/[^a-zA-Z0-9]/g, '_');
+    const finalFilename = `PDI_Manual_${safePart}_Shift_${shift}_${safeDate}.xlsx`;
+
+    const { filePath } = await generatePdiReportWorkbook({
+      partNumber,
+      shift: shift === 'All' ? 'A' : shift,
+      records: [{ created_by: inspectorName || req.user?.name || 'Quality Inspector' }],
+      template,
+      product,
+      date,
+      customRows: rows,
+      isManual: true,
+    });
+
+    // Subject per user request: "in the subject mention part number pdi report"
+    const subject = `${partNumber} PDI Report - Manual Inspection (${shift ? 'Shift ' + shift + ', ' : ''}${date || new Date().toLocaleDateString('en-IN')})`;
+
+    const emailRecipients = Array.isArray(recipients) ? recipients : [recipients];
+    const customer = template?.customer || product?.customer || 'TATA MOTORS  LTD.';
+    const model = template?.description || product?.model || 'Component Assembly';
+    const senderName = inspectorName || req.user?.name || 'Quality Inspector';
+
+    const html = `
+      <div style="font-family: Arial, sans-serif; max-width: 650px; margin: 0 auto; color: #1e293b; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden;">
+        <div style="background-color: #1e293b; color: #ffffff; padding: 20px 24px;">
+          <h2 style="margin: 0 0 6px 0; font-size: 18px; font-weight: 800; letter-spacing: 0.5px;">RSB TRANSMISSIONS (I) LTD.</h2>
+          <div style="font-size: 12px; opacity: 0.85;">Pre-Dispatch Inspection (PDI) Quality Report</div>
+        </div>
+
+        <div style="padding: 24px;">
+          <p style="font-size: 14px; margin-top: 0;">Dear Team,</p>
+          <p style="font-size: 13px; line-height: 1.5; color: #334155;">
+            Please find attached the completed <strong>Manual Pre-Dispatch Inspection (PDI) Report</strong> for Part Number <strong>${partNumber}</strong>.
+          </p>
+
+          <table style="width: 100%; border-collapse: collapse; margin: 18px 0; font-size: 12px;">
+            <tr style="background-color: #f8fafc;">
+              <td style="padding: 8px 12px; border: 1px solid #e2e8f0; font-weight: bold; width: 35%;">Part Number:</td>
+              <td style="padding: 8px 12px; border: 1px solid #e2e8f0; font-weight: 700; color: #1d4ed8;">${partNumber}</td>
+            </tr>
+            <tr>
+              <td style="padding: 8px 12px; border: 1px solid #e2e8f0; font-weight: bold;">Model / Description:</td>
+              <td style="padding: 8px 12px; border: 1px solid #e2e8f0;">${model}</td>
+            </tr>
+            <tr style="background-color: #f8fafc;">
+              <td style="padding: 8px 12px; border: 1px solid #e2e8f0; font-weight: bold;">Customer:</td>
+              <td style="padding: 8px 12px; border: 1px solid #e2e8f0;">${customer}</td>
+            </tr>
+            <tr>
+              <td style="padding: 8px 12px; border: 1px solid #e2e8f0; font-weight: bold;">Shift / Date:</td>
+              <td style="padding: 8px 12px; border: 1px solid #e2e8f0;">Shift ${shift} | ${date || new Date().toLocaleDateString('en-IN')}</td>
+            </tr>
+            <tr style="background-color: #f8fafc;">
+              <td style="padding: 8px 12px; border: 1px solid #e2e8f0; font-weight: bold;">Inspected By:</td>
+              <td style="padding: 8px 12px; border: 1px solid #e2e8f0;">${senderName}</td>
+            </tr>
+            ${remarks ? `
+            <tr>
+              <td style="padding: 8px 12px; border: 1px solid #e2e8f0; font-weight: bold;">Remarks:</td>
+              <td style="padding: 8px 12px; border: 1px solid #e2e8f0;">${remarks}</td>
+            </tr>` : ''}
+          </table>
+
+          <div style="background-color: #f1f5f9; border-left: 4px solid #3b82f6; padding: 12px 16px; border-radius: 4px; margin: 18px 0; font-size: 12px;">
+            <strong>Attachment:</strong> ${finalFilename} (Completed official PDI Check Sheet with measured actual values)
+          </div>
+
+          <p style="font-size: 12px; color: #64748b; margin-bottom: 0;">
+            Regards,<br />
+            <strong>Quality Assurance Department</strong><br />
+            RSB Transmissions (I) Ltd.
+          </p>
+        </div>
+
+        <div style="background-color: #f8fafc; border-top: 1px solid #e2e8f0; padding: 12px 24px; font-size: 11px; color: #94a3b8; text-align: center;">
+          This is an automated inspection notification dispatched from the RSB PDI Quality Management System.
+        </div>
+      </div>
+    `;
+
+    await sendMail({
+      to: emailRecipients,
+      subject,
+      html,
+      attachments: [
+        {
+          filename: finalFilename,
+          path: filePath,
+        },
+      ],
+    });
+
+    // Clean up temp file
+    setTimeout(() => {
+      fs.unlink(filePath, () => {});
+    }, 5000);
+
+    return res.json({
+      success: true,
+      message: `PDI report email sent successfully to ${emailRecipients.join(', ')}`,
+      recipients: emailRecipients,
+      subject,
+    });
+  } catch (err) {
+    console.error('Send Manual PDI Email error:', err);
     return res.status(500).json({ success: false, message: err.message });
   }
 }

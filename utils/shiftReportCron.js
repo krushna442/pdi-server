@@ -22,7 +22,7 @@ const SHIFTS = [
 /**
  * Generate formatted PDI Report Excel for a part number and shift matching official RSB check sheet
  */
-export async function generatePdiReportWorkbook({ partNumber, shift = 'A', records = [], template = null, product = null, date = null }) {
+export async function generatePdiReportWorkbook({ partNumber, shift = 'A', records = [], template = null, product = null, date = null, customRows = null, isManual = false }) {
   const wb = new ExcelJS.Workbook();
   wb.creator = 'RSB Transmissions (I) Ltd.';
   const ws = wb.addWorksheet('PDI Inspection Report');
@@ -278,7 +278,7 @@ export async function generatePdiReportWorkbook({ partNumber, shift = 'A', recor
   }
 
   // 8. POPULATE PARAMETER ROWS FROM TEMPLATE
-  const rows = tpl?.rows || [];
+  const rows = customRows || tpl?.rows || [];
   let currentExcelRow = 12;
 
   // Group contiguous rows by parameter name for Column B merging
@@ -317,7 +317,11 @@ export async function generatePdiReportWorkbook({ partNumber, shift = 'A', recor
     const item = rows[i];
     const rNum = 12 + i;
     const r = ws.getRow(rNum);
-    const readings = generateRandomReadings(item, 6);
+    const readings = isManual && Array.isArray(item.readings)
+      ? item.readings
+      : (Array.isArray(item.readings) && item.readings.length === 6
+          ? item.readings
+          : generateRandomReadings(item, 6));
 
     const isVariable = (item.min !== null && item.min !== '' && item.min !== undefined && !isNaN(Number(item.min))) ||
                        (item.max !== null && item.max !== '' && item.max !== undefined && !isNaN(Number(item.max))) ||
@@ -406,18 +410,22 @@ export async function generatePdiReportWorkbook({ partNumber, shift = 'A', recor
     for (let j = 0; j < 6; j++) {
       const c = r.getCell(9 + j);
       let val = readings[j];
-      if (!isVariable) {
-        if (typeof val === 'string' && val.length > 15) {
-          val = defReading;
-        } else if (val === undefined || val === null || val === '') {
-          val = defReading;
-        }
+      if (isManual) {
+        c.value = (val !== undefined && val !== null) ? String(val) : '';
       } else {
-        if (val === undefined || val === null || val === '') {
-          val = item.mean || '';
+        if (!isVariable) {
+          if (typeof val === 'string' && val.length > 15) {
+            val = defReading;
+          } else if (val === undefined || val === null || val === '') {
+            val = defReading;
+          }
+        } else {
+          if (val === undefined || val === null || val === '') {
+            val = item.mean || '';
+          }
         }
+        c.value = val;
       }
-      c.value = val;
       c.alignment = { horizontal: 'center', vertical: 'middle' };
       c.font = { size: 8, bold: true };
     }
